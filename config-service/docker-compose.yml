@@ -5,8 +5,8 @@ services:
     container_name: config-service
     env_file:
       - ../.env
-#    ports:
-#      - "8099:8099"
+    ports:
+      - "8099:8099"
     networks:
       - backend
 
