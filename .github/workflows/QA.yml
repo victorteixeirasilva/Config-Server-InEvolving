@@ -19,16 +19,32 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
+      - name: Criar arquivo .env a partir de secrets individuais
+        run: |
+          cat > .env << EOL
+          GIT_USERNAME=${{ secrets.GIT_USERNAME }}
+          GIT_TOKEN=${{ secrets.GIT_TOKEN }}
+          IN_EVOLVING_ENCRYPT_KEY=${{ secrets.IN_EVOLVING_ENCRYPT_KEY }}
+          EOL
+          
+          echo "✅ Arquivo .env criado com sucesso!"
+          echo "📄 Conteúdo (sanitizado):"
+          cat .env | sed 's/=.*/=***HIDDEN***/g'  # Mostra estrutura sem expor valores
+
       - name: Dar permissão ao mvnw
         working-directory: config-service
         run: chmod +x mvnw
 
       - name: Build com Maven
         working-directory: config-service
+        env:
+          GIT_USERNAME: ${{ secrets.GIT_USERNAME }}
+          GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
+          IN_EVOLVING_ENCRYPT_KEY: ${{ secrets.IN_EVOLVING_ENCRYPT_KEY }}
         run: ./mvnw clean package
 
-      - name: Compactar pasta config-service
-        run: tar -cvf config-service.tar config-service/
+      - name: Compactar pasta config-service e .env
+        run: tar -cvf config-service.tar config-service/ .env
 
       - name: Instalar sshpass
         run: sudo apt-get install -y sshpass
@@ -40,28 +56,30 @@ jobs:
       - name: Executar comandos na VPS
         run: |
           TARGET_DIR="/home/root/QA/Back-End/Config-Server-InEvolving"
-          sshpass -p "${{ secrets.VPS_PASSWORD }}" ssh -o StrictHostKeyChecking=no ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} << EOF
+          sshpass -p "${{ secrets.VPS_PASSWORD }}" ssh -o StrictHostKeyChecking=no ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} << 'EOF'
             set -e
-      
+            
+            echo "🗑️  Limpando diretório anterior..."
             rm -rf "$TARGET_DIR/config-service"
             mkdir -p "$TARGET_DIR"
+            
+            echo "📦 Extraindo arquivos..."
             tar -xvf /tmp/config-service.tar -C "$TARGET_DIR"
             rm /tmp/config-service.tar
-
-            # Criar arquivo .env diretamente no servidor
-            cat > "$TARGET_DIR/.env" << 'ENVFILE'
-            GIT_USERNAME=${GIT_USERNAME}
-            GIT_TOKEN=${GIT_TOKEN}
-            IN_EVOLVING_ENCRYPT_KEY=${IN_EVOLVING_ENCRYPT_KEY}
-            ENVFILE
             
-            # Permissões
-            chmod 600 "$TARGET_DIR/.env"
-      
+            echo "🔍 Verificando estrutura de pastas:"
+            ls -la "$TARGET_DIR"
+            
+            echo "🐳 Parando containers anteriores..."
             cd "$TARGET_DIR/config-service"
-            docker compose down --volumes --remove-orphans config-service-qa
+            docker compose down --volumes --remove-orphans config-service-qa || true
+            
+            echo "🚀 Iniciando novo container..."
             docker compose up -d config-service-qa
-      
-            echo "Containers ativos:"
-            docker ps
+            
+            echo "✅ Deploy concluído! Containers ativos:"
+            docker ps --filter "name=config-service-qa"
+            
+            echo "📋 Logs do container:"
+            docker logs config-service-qa --tail 50
           EOF
