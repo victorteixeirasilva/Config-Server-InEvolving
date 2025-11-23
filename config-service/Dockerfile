@@ -1,21 +1,18 @@
-##PROD
-#FROM eclipse-temurin:21-jdk-alpine
-#
-#WORKDIR /app
-#
-#COPY target/*.jar app.jar
-#
-#EXPOSE 8099
-#
-#ENTRYPOINT ["java", "-jar", "app.jar"]
-
-#QA
-FROM eclipse-temurin:21-jdk-alpine
+#PROD
+FROM eclipse-temurin:21-jre-alpine
 
 WORKDIR /app
 
 COPY target/*.jar app.jar
 
-EXPOSE 8299
+#QA
+ENV PORT=8099
+ENV JAVA_OPTS="-Xmx300m -Xms128m -XX:MaxMetaspaceSize=128m -XX:+UseG1GC"
 
-ENTRYPOINT ["java", "-jar", "app.jar"]
+EXPOSE 8099
+
+##PROD
+#ENTRYPOINT ["java", "-jar", "app.jar"]
+
+#QA
+ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar app.jar"]

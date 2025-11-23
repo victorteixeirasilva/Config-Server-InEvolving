@@ -1,35 +1,46 @@
-name: Deploy Java Backend via SSH with Password
+name: Deploy Config Server QA to Render
 
 on:
   push:
     branches:
       - QA
+  workflow_dispatch:  # Permite executar manualmente
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
-
+    
     steps:
       - name: Checkout código
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Instalar Java 21
-        uses: actions/setup-java@v3
+        uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '21'
+          cache: 'maven'
 
-      - name: Criar arquivo .env a partir de secrets individuais
+      - name: Validar Secrets
         run: |
-          cat > .env << EOL
-          GIT_USERNAME=${{ secrets.GIT_USERNAME }}
-          GIT_TOKEN=${{ secrets.GIT_TOKEN }}
-          IN_EVOLVING_ENCRYPT_KEY=${{ secrets.IN_EVOLVING_ENCRYPT_KEY }}
-          EOL
+          echo "🔍 Validando secrets necessários..."
           
-          echo "✅ Arquivo .env criado com sucesso!"
-          echo "📄 Conteúdo (sanitizado):"
-          cat .env | sed 's/=.*/=***HIDDEN***/g'
+          if [ -z "${{ secrets.RENDER_API_KEY }}" ]; then
+            echo "❌ RENDER_API_KEY não configurado!"
+            exit 1
+          fi
+          
+          if [ -z "${{ secrets.RENDER_SERVICE_ID }}" ]; then
+            echo "❌ RENDER_SERVICE_ID não configurado!"
+            exit 1
+          fi
+          
+          if [ -z "${{ secrets.GIT_TOKEN }}" ]; then
+            echo "❌ GIT_TOKEN não configurado!"
+            exit 1
+          fi
+          
+          echo "✅ Todos os secrets estão configurados!"
 
       - name: Dar permissão ao mvnw
         working-directory: config-service
@@ -41,55 +52,148 @@ jobs:
           GIT_USERNAME: ${{ secrets.GIT_USERNAME }}
           GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
           IN_EVOLVING_ENCRYPT_KEY: ${{ secrets.IN_EVOLVING_ENCRYPT_KEY }}
-        run: ./mvnw clean package
-
-      - name: Compactar pasta config-service e .env
-        run: tar -cvf config-service.tar config-service/ .env
-
-      - name: Instalar sshpass
-        run: sudo apt-get install -y sshpass
-
-      - name: Enviar .tar para VPS
         run: |
-          sshpass -p "${{ secrets.VPS_PASSWORD }}" scp -o StrictHostKeyChecking=no config-service.tar ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:/tmp/config-service.tar
+          echo "🔨 Iniciando build do Config Server..."
+          ./mvnw clean package -DskipTests
+          
+          echo "✅ Build concluído!"
+          ls -lh target/*.jar
 
-      - name: Executar comandos na VPS
+      - name: Verificar Serviço no Render
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
         run: |
-          sshpass -p "${{ secrets.VPS_PASSWORD }}" ssh -o StrictHostKeyChecking=no ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} << 'EOF'
-            set -e
+          echo "🔍 Verificando serviço no Render..."
+          
+          RESPONSE=$(curl -s -w "\n%{http_code}" \
+            "https://api.render.com/v1/services/$RENDER_SERVICE_ID" \
+            -H "Authorization: Bearer $RENDER_API_KEY")
+          
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+          
+          if [ "$HTTP_CODE" -eq 200 ]; then
+            SERVICE_NAME=$(echo "$BODY" | grep -o '"name":"[^"]*"' | head -1 | cut -d'"' -f4)
+            echo "✅ Serviço encontrado: $SERVICE_NAME"
+          else
+            echo "❌ Erro ao buscar serviço!"
+            echo "HTTP Code: $HTTP_CODE"
+            echo "Response: $BODY"
+            exit 1
+          fi
+
+      - name: Trigger Deploy no Render
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+        run: |
+          echo "🚀 Iniciando deploy no Render..."
+          
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+            "https://api.render.com/v1/services/$RENDER_SERVICE_ID/deploys" \
+            -H "Authorization: Bearer $RENDER_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d '{"clearCache": "clear"}')
+          
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+          
+          if [ "$HTTP_CODE" -eq 201 ]; then
+            DEPLOY_ID=$(echo "$BODY" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+            echo "✅ Deploy iniciado com sucesso!"
+            echo "📋 Deploy ID: $DEPLOY_ID"
+            echo "🔗 Acompanhe em: https://dashboard.render.com/web/$RENDER_SERVICE_ID"
+            echo "DEPLOY_ID=$DEPLOY_ID" >> $GITHUB_ENV
+          else
+            echo "❌ Erro ao iniciar deploy!"
+            echo "HTTP Code: $HTTP_CODE"
+            echo "Response: $BODY"
+            exit 1
+          fi
+
+      - name: Aguardar Deploy Completar
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+        run: |
+          echo "⏳ Aguardando deploy completar..."
+          echo "Isso pode levar 2-5 minutos..."
+          
+          MAX_WAIT=300  # 5 minutos
+          ELAPSED=0
+          
+          while [ $ELAPSED -lt $MAX_WAIT ]; do
+            sleep 15
+            ELAPSED=$((ELAPSED + 15))
             
-            # Definir variável DENTRO do SSH
-            TARGET_DIR="/home/root/QA/Back-End/Config-Server-InEvolving"
+            RESPONSE=$(curl -s \
+              "https://api.render.com/v1/services/$RENDER_SERVICE_ID/deploys/${{ env.DEPLOY_ID }}" \
+              -H "Authorization: Bearer $RENDER_API_KEY")
             
-            echo "🗑️  Limpando diretório anterior..."
-            rm -rf "$TARGET_DIR/config-service"
-            mkdir -p "$TARGET_DIR"
+            STATUS=$(echo "$RESPONSE" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
             
-            echo "📦 Extraindo arquivos..."
-            tar -xvf /tmp/config-service.tar -C "$TARGET_DIR"
-            rm /tmp/config-service.tar
+            echo "[$ELAPSED s] Status: $STATUS"
             
-            echo "🔍 Verificando estrutura de pastas:"
-            ls -la "$TARGET_DIR"
-            
-            echo "🔍 Verificando se .env foi extraído:"
-            if [ -f "$TARGET_DIR/.env" ]; then
-              echo "✅ Arquivo .env encontrado!"
-            else
-              echo "❌ ERRO: Arquivo .env não encontrado!"
+            if [ "$STATUS" = "live" ]; then
+              echo "✅ Deploy concluído com sucesso!"
+              break
+            elif [ "$STATUS" = "build_failed" ] || [ "$STATUS" = "deactivated" ]; then
+              echo "❌ Deploy falhou!"
               exit 1
             fi
+          done
+          
+          if [ $ELAPSED -ge $MAX_WAIT ]; then
+            echo "⚠️ Timeout: Deploy ainda em progresso após 5 minutos"
+            echo "🔗 Verifique manualmente: https://dashboard.render.com/web/$RENDER_SERVICE_ID"
+          fi
+
+      - name: Verificar Saúde do Serviço
+        run: |
+          echo "🧪 Testando Config Server..."
+          
+          # Extrair URL do serviço (ajuste conforme seu serviço)
+          SERVICE_URL="https://config-server-qa.onrender.com"
+          
+          MAX_RETRIES=10
+          RETRY_COUNT=0
+          
+          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+            echo "Tentativa $((RETRY_COUNT + 1)) de $MAX_RETRIES..."
             
-            echo "🐳 Parando containers anteriores..."
-            cd "$TARGET_DIR/config-service"
-            docker compose down --volumes --remove-orphans config-service-qa || true
-            
-            echo "🚀 Iniciando novo container..."
-            docker compose up -d config-service-qa
-            
-            echo "✅ Deploy concluído! Containers ativos:"
-            docker ps --filter "name=config-service-qa"
-            
-            echo "📋 Logs do container (últimas 50 linhas):"
-            docker logs config-service-qa --tail 50
-          EOF
+            if curl -f -s "$SERVICE_URL/actuator/health" > /dev/null 2>&1; then
+              echo "✅ Config Server está UP e respondendo!"
+              echo "🔗 Health Check: $SERVICE_URL/actuator/health"
+              
+              # Testar endpoint de configuração
+              if curl -f -s "$SERVICE_URL/api/default" > /dev/null 2>&1; then
+                echo "✅ Endpoint de configuração funcionando!"
+              else
+                echo "⚠️ Endpoint /api/default retornou erro (pode ser normal se não houver config)"
+              fi
+              
+              exit 0
+            else
+              RETRY_COUNT=$((RETRY_COUNT + 1))
+              echo "⏳ Serviço ainda não está respondendo... Aguardando 15s"
+              sleep 15
+            fi
+          done
+          
+          echo "❌ Serviço não respondeu após $MAX_RETRIES tentativas"
+          echo "🔗 Verifique os logs: https://dashboard.render.com/web/${{ secrets.RENDER_SERVICE_ID }}"
+          exit 1
+
+      - name: Resumo do Deploy
+        if: always()
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📊 RESUMO DO DEPLOY"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "🏷️  Branch: QA"
+          echo "🔧 Serviço: config-server-qa"
+          echo "🔗 Dashboard: https://dashboard.render.com/web/${{ secrets.RENDER_SERVICE_ID }}"
+          echo "🌐 URL: https://config-server-qa.onrender.com"
+          echo "🏥 Health: https://config-server-qa.onrender.com/actuator/health"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

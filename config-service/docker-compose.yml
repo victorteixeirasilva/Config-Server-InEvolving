@@ -6,20 +6,10 @@ services:
     container_name: config-service
     env_file:
       - ../.env
+    environment:
+      - PORT=8099  # ← Força o Spring Boot usar 8099 dentro do container
     ports:
       - "8099:8099"
-    networks:
-      - backend
-
-#QA
-  config-service-qa:
-    build:
-      context: .
-    container_name: config-service-qa
-    env_file:
-      - ../.env
-    ports:
-      - "8299:8299"
     networks:
       - backend
 
