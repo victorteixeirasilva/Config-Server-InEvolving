@@ -47,6 +47,16 @@ jobs:
             mkdir -p "$TARGET_DIR"
             tar -xvf /tmp/config-service.tar -C "$TARGET_DIR"
             rm /tmp/config-service.tar
+
+            # Criar arquivo .env diretamente no servidor
+            cat > "$TARGET_DIR/.env" << 'ENVFILE'
+            GIT_USERNAME=${GIT_USERNAME}
+            GIT_TOKEN=${GIT_TOKEN}
+            IN_EVOLVING_ENCRYPT_KEY=${IN_EVOLVING_ENCRYPT_KEY}
+            ENVFILE
+            
+            # Permissões
+            chmod 600 "$TARGET_DIR/.env"
       
             cd "$TARGET_DIR/config-service"
             docker compose down --volumes --remove-orphans config-service-qa
