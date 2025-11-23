@@ -29,7 +29,7 @@ jobs:
           
           echo "✅ Arquivo .env criado com sucesso!"
           echo "📄 Conteúdo (sanitizado):"
-          cat .env | sed 's/=.*/=***HIDDEN***/g'  # Mostra estrutura sem expor valores
+          cat .env | sed 's/=.*/=***HIDDEN***/g'
 
       - name: Dar permissão ao mvnw
         working-directory: config-service
@@ -55,9 +55,11 @@ jobs:
 
       - name: Executar comandos na VPS
         run: |
-          TARGET_DIR="/home/root/QA/Back-End/Config-Server-InEvolving"
           sshpass -p "${{ secrets.VPS_PASSWORD }}" ssh -o StrictHostKeyChecking=no ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} << 'EOF'
             set -e
+            
+            # Definir variável DENTRO do SSH
+            TARGET_DIR="/home/root/QA/Back-End/Config-Server-InEvolving"
             
             echo "🗑️  Limpando diretório anterior..."
             rm -rf "$TARGET_DIR/config-service"
@@ -70,6 +72,14 @@ jobs:
             echo "🔍 Verificando estrutura de pastas:"
             ls -la "$TARGET_DIR"
             
+            echo "🔍 Verificando se .env foi extraído:"
+            if [ -f "$TARGET_DIR/.env" ]; then
+              echo "✅ Arquivo .env encontrado!"
+            else
+              echo "❌ ERRO: Arquivo .env não encontrado!"
+              exit 1
+            fi
+            
             echo "🐳 Parando containers anteriores..."
             cd "$TARGET_DIR/config-service"
             docker compose down --volumes --remove-orphans config-service-qa || true
@@ -80,6 +90,6 @@ jobs:
             echo "✅ Deploy concluído! Containers ativos:"
             docker ps --filter "name=config-service-qa"
             
-            echo "📋 Logs do container:"
+            echo "📋 Logs do container (últimas 50 linhas):"
             docker logs config-service-qa --tail 50
           EOF
